@@ -149,7 +149,10 @@ resource "terraform_data" "certificate" {
       if [ -z "${var.cluster_issuer}" ]; then echo "ERROR: cluster_issuer is empty"; exit 1; fi
 
       echo "Applying cert-manager Certificate (${local.tls_secret_name}) via ${var.cluster_issuer}..."
-      printf '%s' '${local.certificate_yaml}' | kubectl --context "$CTX" apply -f -
+      # Piped through base64 so no character in the rendered YAML (e.g. a
+      # stray single quote from a hostname/var) can break out of the shell
+      # string and get interpreted as a command.
+      printf '%s' '${base64encode(local.certificate_yaml)}' | base64 -d | kubectl --context "$CTX" apply -f -
 
       echo "Waiting for the certificate to be issued (DNS-01 can take a few minutes)..."
       if ! kubectl --context "$CTX" -n "${var.namespace}" wait \

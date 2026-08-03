@@ -4,6 +4,52 @@ locals {
   expose_kibana = var.enable_elastic && var.expose_kibana_via_gateway
   expose_es     = var.enable_elastic && var.expose_es_via_gateway
   expose_fleet  = var.enable_elastic && var.expose_fleet_via_gateway
+
+  fleet_direct_tls = var.enable_elastic && var.enable_fleet_direct_tls
+  fleet_le_proxy   = var.enable_elastic && var.enable_fleet_le_proxy
+}
+
+# -----------------------------------------------------------------------------
+# Config guard — enforces invariants that are documented in variable
+# descriptions but were never actually checked, so a bad combination used to
+# fail late (mid-apply, or as a silently-wrong deployment) instead of at plan
+# time. terraform_data + lifecycle.precondition is used (rather than
+# per-variable `validation` blocks) because these checks are cross-variable,
+# and cross-variable variable validation needs Terraform >= 1.9 while this
+# project targets >= 1.6.
+# -----------------------------------------------------------------------------
+resource "terraform_data" "config_guard" {
+  lifecycle {
+    precondition {
+      condition     = var.elastic_es_node_count != 2 || var.elastic_enable_voting_only_node
+      error_message = "elastic_es_node_count = 2 requires elastic_enable_voting_only_node = true — two master-eligible nodes can't safely reach quorum if one goes down (split-brain risk)."
+    }
+
+    precondition {
+      condition     = !(local.expose_fleet && local.fleet_direct_tls)
+      error_message = "expose_fleet_via_gateway and enable_fleet_direct_tls are mutually exclusive Fleet exposure methods — enable only one."
+    }
+
+    precondition {
+      condition     = !(local.expose_fleet && local.fleet_le_proxy)
+      error_message = "expose_fleet_via_gateway and enable_fleet_le_proxy are mutually exclusive Fleet exposure methods — enable only one."
+    }
+
+    precondition {
+      condition     = !(local.fleet_direct_tls && local.fleet_le_proxy)
+      error_message = "enable_fleet_direct_tls and enable_fleet_le_proxy are mutually exclusive Fleet exposure methods — enable only one."
+    }
+
+    precondition {
+      condition     = !var.enable_lets_encrypt || var.cluster_issuer != ""
+      error_message = "enable_lets_encrypt = true requires cluster_issuer to be set."
+    }
+
+    precondition {
+      condition     = !(local.fleet_direct_tls || local.fleet_le_proxy) || var.cluster_issuer != ""
+      error_message = "enable_fleet_direct_tls / enable_fleet_le_proxy require cluster_issuer to be set (a cert-manager ClusterIssuer)."
+    }
+  }
 }
 
 module "cert" {

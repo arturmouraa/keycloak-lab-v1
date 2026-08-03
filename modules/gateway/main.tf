@@ -358,12 +358,16 @@ resource "terraform_data" "gateway_manifests" {
     keycloak_route_yaml = local.keycloak_route_yaml
   }
 
+  # Each manifest is base64-encoded before being embedded in the command and
+  # decoded on the way into kubectl, so no character in the rendered YAML
+  # (e.g. a stray single quote from a hostname/var) can break out of the
+  # shell string and get interpreted as a command.
   provisioner "local-exec" {
     command = <<-EOT
-      echo '${self.triggers_replace.gateway_class_yaml}' | kubectl --context=${self.triggers_replace.kube_context} apply -f - && \
-      echo '${self.triggers_replace.gateway_yaml}' | kubectl --context=${self.triggers_replace.kube_context} apply -f - && \
-      echo '${self.triggers_replace.http_redirect_yaml}' | kubectl --context=${self.triggers_replace.kube_context} apply -f - && \
-      echo '${self.triggers_replace.keycloak_route_yaml}' | kubectl --context=${self.triggers_replace.kube_context} apply -f -
+      echo '${base64encode(self.triggers_replace.gateway_class_yaml)}' | base64 -d | kubectl --context=${self.triggers_replace.kube_context} apply -f - && \
+      echo '${base64encode(self.triggers_replace.gateway_yaml)}' | base64 -d | kubectl --context=${self.triggers_replace.kube_context} apply -f - && \
+      echo '${base64encode(self.triggers_replace.http_redirect_yaml)}' | base64 -d | kubectl --context=${self.triggers_replace.kube_context} apply -f - && \
+      echo '${base64encode(self.triggers_replace.keycloak_route_yaml)}' | base64 -d | kubectl --context=${self.triggers_replace.kube_context} apply -f -
     EOT
   }
 

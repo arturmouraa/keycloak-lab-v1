@@ -5,3 +5,6 @@ terraform.tfvars
 .terraform/
 .terraform.lock.hcl
 config-proxmox
+*.bkp
+*.bkp.*
+.DS_Store

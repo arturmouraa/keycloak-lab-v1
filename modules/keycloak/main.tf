@@ -250,8 +250,10 @@ resource "terraform_data" "keycloak_cr" {
     keycloak_cr_yaml = local.keycloak_cr_yaml
   }
 
+  # base64 round-trip so nothing in the rendered YAML (e.g. a stray single
+  # quote in a hostname) can break out of the shell string.
   provisioner "local-exec" {
-    command = "echo '${self.triggers_replace.keycloak_cr_yaml}' | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
+    command = "echo '${base64encode(self.triggers_replace.keycloak_cr_yaml)}' | base64 -d | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
   }
 
   provisioner "local-exec" {
@@ -305,8 +307,10 @@ resource "terraform_data" "realm_import" {
     realm_import_yaml = local.realm_import_yaml
   }
 
+  # base64 round-trip so nothing in the rendered YAML (e.g. a stray single
+  # quote in realm_client_redirect_uris) can break out of the shell string.
   provisioner "local-exec" {
-    command = "echo '${self.triggers_replace.realm_import_yaml}' | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
+    command = "echo '${base64encode(self.triggers_replace.realm_import_yaml)}' | base64 -d | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
   }
 
   provisioner "local-exec" {

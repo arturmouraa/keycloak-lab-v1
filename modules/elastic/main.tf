@@ -247,6 +247,15 @@ locals {
 
   fleet_http = merge(local.fleet_service, local.fleet_tls)
 
+  # NOTE on securityContext.runAsUser = 0 below (both this Agent and
+  # elastic_agent): this matches Elastic's own official ECK quickstart/recipe
+  # manifests for Fleet Server and Elastic Agent, and was a hard requirement
+  # before Elastic Stack 7.14 / ECK 2.10 (local state dir ownership on the
+  # hostPath/emptyDir volume). Running non-root is possible on this stack
+  # version but needs extra wiring (an init container or DaemonSet to chown
+  # local state, or moving state to a dedicated emptyDir) that isn't set up
+  # here — left as-is rather than changed blind, since it's not testable
+  # without a live cluster.
   fleet_server = {
     apiVersion = "agent.k8s.elastic.co/v1alpha1"
     kind       = "Agent"
@@ -549,7 +558,10 @@ locals {
   # --- Fleet LE terminator proxy (Option B) -----------------------------------
   # nginx presents the LE cert (fleet-tls) to external agents and re-encrypts to
   # Fleet's stock self-signed :8220. HTTP/2 on the client side, long timeouts for
-  # agent long-polling, verify-off on the internal hop (cluster-local).
+  # agent long-polling. The internal hop verifies Fleet Server's self-signed
+  # cert against the CA published by terraform_data.fleet_server_ca (same
+  # pattern as the ES BackendTLSPolicy CA fetch below) rather than trusting it
+  # blindly, since this is a network hop like any other inside the cluster.
   fleet_proxy_nginx_conf = <<-EOT
     worker_processes auto;
     error_log /dev/stderr warn;
@@ -563,8 +575,11 @@ locals {
         ssl_certificate_key /etc/nginx/tls/tls.key;
         client_max_body_size 100m;
         location / {
-          proxy_pass https://fleet-server-agent-http.${var.namespace}.svc.cluster.local:8220;
-          proxy_ssl_verify off;
+          proxy_pass https://${local.fleet_http_host}:8220;
+          proxy_ssl_trusted_certificate /etc/nginx/fleet-ca/ca.crt;
+          proxy_ssl_verify on;
+          proxy_ssl_verify_depth 2;
+          proxy_ssl_name ${local.fleet_http_host};
           proxy_ssl_server_name on;
           proxy_http_version 1.1;
           proxy_set_header Host $host;
@@ -614,11 +629,13 @@ locals {
               volumeMounts = [
                 { name = "conf", mountPath = "/etc/nginx/nginx.conf", subPath = "nginx.conf" },
                 { name = "tls", mountPath = "/etc/nginx/tls", readOnly = true },
+                { name = "fleet-ca", mountPath = "/etc/nginx/fleet-ca", readOnly = true },
               ]
             }]
             volumes = [
               { name = "conf", configMap = { name = "fleet-le-proxy" } },
               { name = "tls", secret = { secretName = "fleet-tls" } },
+              { name = "fleet-ca", configMap = { name = "fleet-server-ca" } },
             ]
           }
         }
@@ -753,8 +770,10 @@ resource "terraform_data" "elastic_stack" {
     stack_manifest      = local.stack_manifest
   }
 
+  # base64 round-trip so nothing in the rendered YAML (e.g. a stray single
+  # quote in a hostname/var) can break out of the shell string.
   provisioner "local-exec" {
-    command = "echo '${self.triggers_replace.stack_manifest}' | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
+    command = "echo '${base64encode(self.triggers_replace.stack_manifest)}' | base64 -d | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
   }
 
   # Do NOT tear the stack down on replace. This resource is replaced whenever
@@ -794,8 +813,10 @@ resource "terraform_data" "gateway_routes" {
     routes_yaml  = local.gateway_routes_manifest
   }
 
+  # base64 round-trip so nothing in the rendered YAML (e.g. a stray single
+  # quote in a hostname) can break out of the shell string.
   provisioner "local-exec" {
-    command = "echo '${self.triggers_replace.routes_yaml}' | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
+    command = "echo '${base64encode(self.triggers_replace.routes_yaml)}' | base64 -d | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
   }
 
   # In-place: a hostname change updates these routes via `kubectl apply` (same
@@ -845,7 +866,7 @@ resource "terraform_data" "es_backend_tls" {
         --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
 
       echo "Applying BackendTLSPolicy for Elasticsearch..."
-      printf '%s' '${local.es_backendtls_manifest}' | kubectl --context "$CTX" apply -f -
+      printf '%s' '${base64encode(local.es_backendtls_manifest)}' | base64 -d | kubectl --context "$CTX" apply -f -
     EOT
   }
 
@@ -879,7 +900,7 @@ resource "terraform_data" "fleet_cert" {
       CTX="${var.kube_context}"
       if [ -z "${var.cluster_issuer}" ]; then echo "ERROR: cluster_issuer is empty (needs cert-manager)"; exit 1; fi
       echo "Applying Fleet Certificate (fleet-tls) via ${var.cluster_issuer}..."
-      printf '%s' '${local.fleet_cert_manifest}' | kubectl --context "$CTX" apply -f -
+      printf '%s' '${base64encode(local.fleet_cert_manifest)}' | base64 -d | kubectl --context "$CTX" apply -f -
       kubectl --context "$CTX" -n "${var.namespace}" wait \
         --for=condition=Ready certificate/fleet-tls --timeout=420s || \
         echo "WARNING: fleet-tls not Ready yet; check: kubectl -n ${var.namespace} describe certificate fleet-tls"
@@ -896,7 +917,51 @@ resource "terraform_data" "fleet_cert" {
 }
 
 # -----------------------------------------------------------------------------
-# Step 9 — Fleet LE terminator proxy (Option B). nginx presents the LE cert and
+# Step 9 — Fleet Server CA, published so the LE proxy (below) can verify the
+# internal hop instead of disabling TLS verification. Same pattern as
+# es_backend_tls: ECK's self-signed cert secret naming is
+# <http-service-name>-certs-public, matching elasticsearch-es-http-certs-public.
+# -----------------------------------------------------------------------------
+resource "terraform_data" "fleet_server_ca" {
+  count = var.enable_fleet_le_proxy ? 1 : 0
+
+  triggers_replace = {
+    kube_context = var.kube_context
+    namespace    = var.namespace
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      CTX="${var.kube_context}"; NS="${var.namespace}"
+
+      echo "Fetching the ECK Fleet Server HTTP CA..."
+      CA=""
+      for i in $(seq 1 30); do
+        CA=$(kubectl --context "$CTX" -n "$NS" get secret fleet-server-agent-http-certs-public \
+          -o jsonpath='{.data.ca\.crt}' 2>/dev/null | base64 -d || true)
+        [ -n "$CA" ] && break
+        echo "  ...Fleet Server CA not ready ($i/30), sleeping 10s"; sleep 10
+      done
+      if [ -z "$CA" ]; then echo "ERROR: Fleet Server HTTP CA not found"; exit 1; fi
+
+      echo "Publishing fleet-server-ca ConfigMap for the LE proxy..."
+      kubectl --context "$CTX" -n "$NS" create configmap fleet-server-ca --from-literal=ca.crt="$CA" \
+        --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
+    EOT
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = "echo 'Leaving fleet-server-ca ConfigMap in place; namespace teardown removes it.'"
+  }
+
+  depends_on = [terraform_data.elastic_stack]
+}
+
+# -----------------------------------------------------------------------------
+# Step 10 — Fleet LE terminator proxy (Option B). nginx presents the LE cert and
 # re-encrypts to Fleet's stock self-signed :8220, so external agents get a
 # publicly-trusted endpoint while Fleet Server stays untouched. Point
 # fleet_hostname DNS at the proxy's LoadBalancer IP.
@@ -910,12 +975,14 @@ resource "terraform_data" "fleet_le_proxy" {
     proxy_manifest = local.fleet_proxy_manifest
   }
 
+  # base64 round-trip so nothing in the rendered YAML can break out of the
+  # shell string.
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
       CTX="${var.kube_context}"
-      printf '%s' '${local.fleet_proxy_manifest}' | kubectl --context "$CTX" apply -f -
+      printf '%s' '${base64encode(local.fleet_proxy_manifest)}' | base64 -d | kubectl --context "$CTX" apply -f -
       kubectl --context "$CTX" -n "${var.namespace}" rollout status deployment/fleet-le-proxy --timeout=180s || \
         echo "WARNING: fleet-le-proxy not ready yet; check: kubectl -n ${var.namespace} get pods -l app=fleet-le-proxy"
     EOT
@@ -927,5 +994,5 @@ resource "terraform_data" "fleet_le_proxy" {
     command = "echo 'Leaving fleet-le-proxy in place on replace; namespace teardown removes it.'"
   }
 
-  depends_on = [terraform_data.fleet_cert, terraform_data.elastic_stack]
+  depends_on = [terraform_data.fleet_cert, terraform_data.fleet_server_ca, terraform_data.elastic_stack]
 }

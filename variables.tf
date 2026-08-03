@@ -28,6 +28,11 @@ variable "keycloak_admin_password" {
   description = "Initial Keycloak admin password (applied on first start only)"
   default     = "admin"
   sensitive   = true
+
+  validation {
+    condition     = !contains(["", "admin", "password", "changeme", "keycloak", "root", "test"], lower(var.keycloak_admin_password))
+    error_message = "keycloak_admin_password looks like a placeholder/weak default — set a real password in terraform.tfvars before applying."
+  }
 }
 
 variable "postgres_db_name" {
@@ -41,6 +46,11 @@ variable "postgres_db_user" {
 variable "postgres_db_password" {
   default   = "keycloak"
   sensitive = true
+
+  validation {
+    condition     = !contains(["", "admin", "password", "changeme", "keycloak", "postgres", "root", "test"], lower(var.postgres_db_password))
+    error_message = "postgres_db_password looks like a placeholder/weak default — set a real password in terraform.tfvars before applying."
+  }
 }
 
 # --- Realm import ---
