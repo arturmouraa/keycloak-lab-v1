@@ -1,0 +1,76 @@
+# =============================================================================
+# Platform stack values for the PROXMOX cluster (provisioned by ../proxmox-k8s).
+# Copy to terraform.tfvars when deploying against Proxmox:
+#     cp terraform.tfvars.proxmox.example terraform.tfvars
+# (Keep terraform.tfvars.example for the Docker Desktop values.)
+# =============================================================================
+
+# Point at the Proxmox cluster. The cluster stack renamed its context to
+# "proxmox" and merged it into ~/.kube/config, so the default kubeconfig works.
+kubeconfig_path = "~/.kube/config"
+kube_context    = "proxmox"
+
+# Namespaces
+keycloak_namespace = "keycloak"
+gateway_namespace  = "gateway"
+
+# Hostnames — add BOTH to /etc/hosts pointing at the gateway's MetalLB IP:
+#     172.16.98.200  keycloak.local kibana.local
+keycloak_hostname       = "keycloak.local"
+elastic_kibana_hostname = "kibana.local"
+
+# Pin the gateway to the MetalLB pool IP (matches ../proxmox-k8s output
+# suggested_gateway_lb_ip). This is the IP your /etc/hosts entries resolve to.
+gateway_load_balancer_ip = "172.16.98.200"
+
+# ── TLS: Let's Encrypt (cert-manager, DNS-01 via Cloudflare) ─────────────────
+# Default is the self-signed CA (leave enable_lets_encrypt = false).
+#
+# To use Let's Encrypt instead:
+#   1. In ../proxmox-k8s set enable_cert_manager = true (installs cert-manager +
+#      the letsencrypt-staging / letsencrypt-prod ClusterIssuers) and apply.
+#   2. Switch the hostnames above to PUBLIC, Cloudflare-managed names — Let's
+#      Encrypt cannot issue for .local. e.g.:
+#          keycloak_hostname       = "keycloak.example.com"
+#          elastic_kibana_hostname = "kibana.example.com"
+#      These still resolve to the gateway IP on your LAN via /etc/hosts (or a
+#      split-horizon DNS record); DNS-01 validates through Cloudflare, not the IP.
+#   3. Set the toggle + issuer. Start on staging to avoid prod rate limits.
+#
+# enable_lets_encrypt = true
+# cluster_issuer      = "letsencrypt-staging"   # then "letsencrypt-prod"
+enable_lets_encrypt = false
+cluster_issuer      = "letsencrypt-staging"
+
+# Keycloak initial admin
+keycloak_admin_user     = "admin"
+keycloak_admin_password = "changeme"
+
+# PostgreSQL credentials
+postgres_db_name     = "keycloak"
+postgres_db_user     = "keycloak"
+postgres_db_password = "changeme"
+
+# Realm import
+enable_realm_import        = true
+realm_name                 = "demo"
+realm_client_id            = "demo-client"
+realm_client_redirect_uris = ["*"]
+
+# Elastic — the Proxmox workers (8 GB each) have more headroom than Docker
+# Desktop, so you can raise these if you like.
+enable_elastic          = true
+elastic_namespace       = "elastic-stack"
+eck_version             = "3.4.0"
+elastic_stack_version   = "9.4.3"
+elastic_es_node_count   = 1
+elastic_es_memory       = "2Gi"
+elastic_es_storage_size = "5Gi"
+elastic_kibana_memory   = "1Gi"
+
+expose_kibana_via_gateway = true
+
+# kube-state-metrics
+enable_kube_state_metrics        = true
+kube_state_metrics_namespace     = "kube-system"
+kube_state_metrics_chart_version = "5.27.1"

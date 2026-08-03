@@ -1,0 +1,476 @@
+# -----------------------------------------------------------------------------
+# Elastic Cloud on Kubernetes (ECK)
+# Official install: https://www.elastic.co/docs/deploy-manage/deploy/cloud-on-k8s
+#
+# Deploys, via the ECK operator:
+#   - Elasticsearch
+#   - Kibana (pre-configured for Fleet)
+#   - Fleet Server (Agent in fleet mode, fleetServerEnabled)
+#   - Elastic Agent (Agent in fleet mode, enrolled into Fleet Server)
+#
+# Same pattern as the rest of the project: operator + CRDs and all custom
+# resources are applied via kubectl local-exec to avoid the Kubernetes
+# provider's plan-time CRD validation problem. Plain core resources (the
+# namespace) use the native provider.
+# -----------------------------------------------------------------------------
+
+locals {
+  eck_crds_url     = "https://download.elastic.co/downloads/eck/${var.eck_version}/crds.yaml"
+  eck_operator_url = "https://download.elastic.co/downloads/eck/${var.eck_version}/operator.yaml"
+
+  # In-cluster service DNS names the operator creates for the stack.
+  es_http_host    = "elasticsearch-es-http.${var.namespace}.svc"
+  fleet_http_host = "fleet-server-agent-http.${var.namespace}.svc"
+
+  # --- Elasticsearch ---
+  elasticsearch = {
+    apiVersion = "elasticsearch.k8s.elastic.co/v1"
+    kind       = "Elasticsearch"
+    metadata   = { name = "elasticsearch", namespace = var.namespace }
+    spec = {
+      version = var.stack_version
+      nodeSets = [
+        {
+          name  = "default"
+          count = var.es_node_count
+          config = {
+            # Required on Docker Desktop: avoids the vm.max_map_count requirement
+            "node.store.allow_mmap" = false
+          }
+          podTemplate = {
+            spec = {
+              containers = [
+                {
+                  name = "elasticsearch"
+                  resources = {
+                    requests = { memory = var.es_memory, cpu = "500m" }
+                    limits   = { memory = var.es_memory, cpu = "2" }
+                  }
+                }
+              ]
+            }
+          }
+          volumeClaimTemplates = [
+            {
+              metadata = { name = "elasticsearch-data" }
+              spec = {
+                accessModes = ["ReadWriteOnce"]
+                resources   = { requests = { storage = var.es_storage_size } }
+                # storageClassName left unset → cluster default (Docker Desktop "hostpath")
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+
+  # Kibana config. When exposed through the gateway we disable Kibana's own
+  # self-signed TLS (gateway terminates TLS and talks HTTP to Kibana, mirroring
+  # the Keycloak setup) and set the public base URL so links are generated
+  # against the external https hostname.
+  kibana_base_config = {
+    "xpack.fleet.agents.elasticsearch.hosts" = ["https://${local.es_http_host}:9200"]
+    "xpack.fleet.agents.fleet_server.hosts"  = ["https://${local.fleet_http_host}:8220"]
+    "xpack.fleet.packages" = [
+      { name = "system", version = "latest" },
+      { name = "elastic_agent", version = "latest" },
+      { name = "fleet_server", version = "latest" },
+      { name = "kubernetes", version = "latest" },
+    ]
+    "xpack.fleet.agentPolicies" = [
+      {
+        name               = "Fleet Server on ECK policy"
+        id                 = "eck-fleet-server"
+        namespace          = "default"
+        is_managed         = true
+        monitoring_enabled = ["logs", "metrics"]
+        unenroll_timeout   = 900
+        package_policies = [
+          { name = "fleet_server-1", id = "fleet_server-1", package = { name = "fleet_server" } }
+        ]
+      },
+      {
+        name               = "Elastic Agent on ECK policy"
+        id                 = "eck-agent"
+        namespace          = "default"
+        is_managed         = true
+        monitoring_enabled = ["logs", "metrics"]
+        unenroll_timeout   = 900
+        package_policies = [
+          { name = "system-1", id = "system-1", package = { name = "system" } },
+          { name = "kubernetes-1", id = "kubernetes-1", package = { name = "kubernetes" } },
+        ]
+      },
+    ]
+  }
+
+  kibana_proxy_config = var.enable_kibana_route ? {
+    "server.publicBaseUrl" = "https://${var.kibana_hostname}"
+  } : {}
+
+  # --- Kibana ---
+  kibana = {
+    apiVersion = "kibana.k8s.elastic.co/v1"
+    kind       = "Kibana"
+    metadata   = { name = "kibana", namespace = var.namespace }
+    spec = merge(
+      {
+        version          = var.stack_version
+        count            = 1
+        elasticsearchRef = { name = "elasticsearch" }
+        config           = merge(local.kibana_base_config, local.kibana_proxy_config)
+        podTemplate = {
+          spec = {
+            containers = [
+              {
+                name = "kibana"
+                resources = {
+                  requests = { memory = var.kibana_memory, cpu = "500m" }
+                  limits   = { memory = var.kibana_memory, cpu = "1" }
+                }
+              }
+            ]
+          }
+        }
+      },
+      # Disable Kibana's self-signed HTTP TLS only when fronted by the gateway
+      var.enable_kibana_route ? {
+        http = {
+          tls = {
+            selfSignedCertificate = { disabled = true }
+          }
+        }
+      } : {}
+    )
+  }
+
+  # --- Fleet Server (Agent in fleet mode) ---
+  fleet_server = {
+    apiVersion = "agent.k8s.elastic.co/v1alpha1"
+    kind       = "Agent"
+    metadata   = { name = "fleet-server", namespace = var.namespace }
+    spec = {
+      version            = var.stack_version
+      kibanaRef          = { name = "kibana" }
+      elasticsearchRefs  = [{ name = "elasticsearch" }]
+      mode               = "fleet"
+      fleetServerEnabled = true
+      policyID           = "eck-fleet-server"
+      deployment = {
+        replicas = 1
+        podTemplate = {
+          spec = {
+            serviceAccountName           = "fleet-server"
+            automountServiceAccountToken = true
+            securityContext              = { runAsUser = 0 }
+          }
+        }
+      }
+    }
+  }
+
+  # --- Elastic Agent (Agent in fleet mode, enrolled into Fleet Server) ---
+  elastic_agent = {
+    apiVersion = "agent.k8s.elastic.co/v1alpha1"
+    kind       = "Agent"
+    metadata   = { name = "elastic-agent", namespace = var.namespace }
+    spec = {
+      version        = var.stack_version
+      kibanaRef      = { name = "kibana" }
+      fleetServerRef = { name = "fleet-server" }
+      mode           = "fleet"
+      policyID       = "eck-agent"
+      daemonSet = {
+        podTemplate = {
+          spec = {
+            serviceAccountName           = "elastic-agent"
+            hostNetwork                  = true
+            dnsPolicy                    = "ClusterFirstWithHostNet"
+            automountServiceAccountToken = true
+            securityContext              = { runAsUser = 0 }
+          }
+        }
+      }
+    }
+  }
+
+  # --- RBAC for Fleet Server ---
+  fleet_server_sa = {
+    apiVersion = "v1"
+    kind       = "ServiceAccount"
+    metadata   = { name = "fleet-server", namespace = var.namespace }
+  }
+  fleet_server_cr = {
+    apiVersion = "rbac.authorization.k8s.io/v1"
+    kind       = "ClusterRole"
+    metadata   = { name = "fleet-server-${var.namespace}" }
+    rules = [
+      { apiGroups = [""], resources = ["pods", "namespaces", "nodes"], verbs = ["get", "watch", "list"] },
+      { apiGroups = ["apps"], resources = ["replicasets"], verbs = ["get", "watch", "list"] },
+      { apiGroups = ["batch"], resources = ["jobs"], verbs = ["get", "watch", "list"] },
+      { apiGroups = ["coordination.k8s.io"], resources = ["leases"], verbs = ["get", "create", "update"] },
+    ]
+  }
+  fleet_server_crb = {
+    apiVersion = "rbac.authorization.k8s.io/v1"
+    kind       = "ClusterRoleBinding"
+    metadata   = { name = "fleet-server-${var.namespace}" }
+    subjects   = [{ kind = "ServiceAccount", name = "fleet-server", namespace = var.namespace }]
+    roleRef    = { kind = "ClusterRole", name = "fleet-server-${var.namespace}", apiGroup = "rbac.authorization.k8s.io" }
+  }
+
+  # --- RBAC for Elastic Agent ---
+  elastic_agent_sa = {
+    apiVersion = "v1"
+    kind       = "ServiceAccount"
+    metadata   = { name = "elastic-agent", namespace = var.namespace }
+  }
+  elastic_agent_cr = {
+    apiVersion = "rbac.authorization.k8s.io/v1"
+    kind       = "ClusterRole"
+    metadata   = { name = "elastic-agent-${var.namespace}" }
+    rules = [
+      {
+        apiGroups = [""]
+        resources = ["pods", "nodes", "namespaces", "events", "services", "configmaps", "persistentvolumes", "persistentvolumeclaims", "nodes/stats"]
+        verbs     = ["get", "watch", "list"]
+      },
+      { apiGroups = ["events.k8s.io"], resources = ["events"], verbs = ["get", "watch", "list"] },
+      { apiGroups = ["coordination.k8s.io"], resources = ["leases"], verbs = ["get", "create", "update"] },
+      { apiGroups = ["extensions"], resources = ["replicasets"], verbs = ["get", "list", "watch"] },
+      { apiGroups = ["apps"], resources = ["statefulsets", "deployments", "replicasets", "daemonsets"], verbs = ["get", "list", "watch"] },
+      { apiGroups = ["batch"], resources = ["jobs", "cronjobs"], verbs = ["get", "list", "watch"] },
+      { apiGroups = ["storage.k8s.io"], resources = ["storageclasses"], verbs = ["get", "list", "watch"] },
+      { nonResourceURLs = ["/metrics"], verbs = ["get"] },
+    ]
+  }
+  elastic_agent_crb = {
+    apiVersion = "rbac.authorization.k8s.io/v1"
+    kind       = "ClusterRoleBinding"
+    metadata   = { name = "elastic-agent-${var.namespace}" }
+    subjects   = [{ kind = "ServiceAccount", name = "elastic-agent", namespace = var.namespace }]
+    roleRef    = { kind = "ClusterRole", name = "elastic-agent-${var.namespace}", apiGroup = "rbac.authorization.k8s.io" }
+  }
+
+  # --- Optional Kibana routes (attach to the shared gateway, cross-namespace) ---
+  kibana_route = {
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata   = { name = "kibana-route", namespace = var.namespace }
+    spec = {
+      parentRefs = [{
+        name        = var.gateway_name
+        namespace   = var.gateway_namespace
+        sectionName = "https-kibana"
+      }]
+      hostnames = [var.kibana_hostname]
+      rules = [{
+        backendRefs = [{
+          group = ""
+          kind  = "Service"
+          name  = "kibana-kb-http"
+          port  = 5601
+        }]
+      }]
+    }
+  }
+  kibana_redirect = {
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata   = { name = "kibana-http-redirect", namespace = var.namespace }
+    spec = {
+      parentRefs = [{
+        name        = var.gateway_name
+        namespace   = var.gateway_namespace
+        sectionName = "http-kibana"
+      }]
+      hostnames = [var.kibana_hostname]
+      rules = [{
+        filters = [{
+          type            = "RequestRedirect"
+          requestRedirect = { scheme = "https", statusCode = 301 }
+        }]
+      }]
+    }
+  }
+
+  # Full stack manifest as one multi-document YAML string.
+  # Each document is encoded to a YAML string *before* concatenation so both
+  # branches of the conditional are list(string) with identical element types
+  # (Terraform rejects concatenating tuples whose element object shapes differ).
+  base_docs = [
+    yamlencode(local.fleet_server_sa),
+    yamlencode(local.fleet_server_cr),
+    yamlencode(local.fleet_server_crb),
+    yamlencode(local.elastic_agent_sa),
+    yamlencode(local.elastic_agent_cr),
+    yamlencode(local.elastic_agent_crb),
+    yamlencode(local.elasticsearch),
+    yamlencode(local.kibana),
+    yamlencode(local.fleet_server),
+    yamlencode(local.elastic_agent),
+  ]
+
+  kibana_route_docs = var.enable_kibana_route ? [
+    yamlencode(local.kibana_route),
+    yamlencode(local.kibana_redirect),
+  ] : []
+
+  stack_manifest = join("\n---\n", concat(local.base_docs, local.kibana_route_docs))
+}
+
+# -----------------------------------------------------------------------------
+# Step 1 — Install ECK CRDs (server-side apply avoids the annotation size limit
+# that the large ECK CRDs hit with client-side apply)
+# -----------------------------------------------------------------------------
+resource "terraform_data" "eck_crds" {
+  triggers_replace = {
+    kube_context = var.kube_context
+    eck_version  = var.eck_version
+    crds_url     = local.eck_crds_url
+  }
+
+  provisioner "local-exec" {
+    command = "kubectl --context=${self.triggers_replace.kube_context} apply --server-side -f ${self.triggers_replace.crds_url}"
+  }
+
+  # Deleting the ECK CRDs cascades to ALL Elastic custom resources in the cluster.
+  provisioner "local-exec" {
+    when    = destroy
+    command = "kubectl --context=${self.triggers_replace.kube_context} delete -f ${self.triggers_replace.crds_url} --ignore-not-found"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Step 2 — Wait for the CRDs we use to be established
+# -----------------------------------------------------------------------------
+resource "terraform_data" "eck_crds_ready" {
+  triggers_replace = {
+    kube_context = var.kube_context
+    crds_id      = terraform_data.eck_crds.id
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      kubectl --context=${self.triggers_replace.kube_context} wait \
+        --for=condition=Established \
+        --timeout=120s \
+        crd/elasticsearches.elasticsearch.k8s.elastic.co \
+        crd/kibanas.kibana.k8s.elastic.co \
+        crd/agents.agent.k8s.elastic.co
+    EOT
+  }
+
+  depends_on = [terraform_data.eck_crds]
+}
+
+# -----------------------------------------------------------------------------
+# Step 3 — Install the ECK operator (into the elastic-system namespace)
+# -----------------------------------------------------------------------------
+resource "terraform_data" "eck_operator" {
+  triggers_replace = {
+    kube_context = var.kube_context
+    operator_url = local.eck_operator_url
+  }
+
+  provisioner "local-exec" {
+    command = "kubectl --context=${self.triggers_replace.kube_context} apply -f ${self.triggers_replace.operator_url}"
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = "kubectl --context=${self.triggers_replace.kube_context} delete -f ${self.triggers_replace.operator_url} --ignore-not-found"
+  }
+
+  depends_on = [terraform_data.eck_crds_ready]
+}
+
+# -----------------------------------------------------------------------------
+# Step 4 — Wait for the operator StatefulSet to be ready
+# -----------------------------------------------------------------------------
+resource "terraform_data" "eck_operator_ready" {
+  triggers_replace = {
+    kube_context = var.kube_context
+    operator_id  = terraform_data.eck_operator.id
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      kubectl --context=${self.triggers_replace.kube_context} rollout status \
+        statefulset/elastic-operator \
+        -n elastic-system \
+        --timeout=180s
+    EOT
+  }
+
+  depends_on = [terraform_data.eck_operator]
+}
+
+# -----------------------------------------------------------------------------
+# Step 5 — Namespace for the Elastic stack (core resource, native provider)
+# -----------------------------------------------------------------------------
+resource "kubernetes_namespace" "elastic" {
+  metadata { name = var.namespace }
+}
+
+# -----------------------------------------------------------------------------
+# Step 6 — Apply the full stack (Elasticsearch, Kibana, Fleet Server, Elastic
+# Agent + RBAC, and optionally the Kibana gateway routes). ECK reconciles the
+# inter-resource dependencies itself, so all resources are applied together.
+# -----------------------------------------------------------------------------
+resource "terraform_data" "elastic_stack" {
+  triggers_replace = {
+    kube_context        = var.kube_context
+    namespace           = var.namespace
+    gateway_namespace   = var.gateway_namespace
+    enable_kibana_route = tostring(var.enable_kibana_route)
+    stack_manifest      = local.stack_manifest
+  }
+
+  provisioner "local-exec" {
+    command = "echo '${self.triggers_replace.stack_manifest}' | kubectl --context=${self.triggers_replace.kube_context} apply -f -"
+  }
+
+  # Destroy: remove custom resources first (guarded by CRD existence so a prior
+  # CRD deletion doesn't turn this into an error), then the cluster-scoped RBAC.
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      kubectl --context=${self.triggers_replace.kube_context} \
+        get crd httproutes.gateway.networking.k8s.io > /dev/null 2>&1 && \
+        kubectl --context=${self.triggers_replace.kube_context} delete httproute \
+          kibana-route kibana-http-redirect \
+          -n ${self.triggers_replace.namespace} --ignore-not-found \
+        || true
+
+      kubectl --context=${self.triggers_replace.kube_context} \
+        get crd agents.agent.k8s.elastic.co > /dev/null 2>&1 && \
+        kubectl --context=${self.triggers_replace.kube_context} delete agent \
+          elastic-agent fleet-server -n ${self.triggers_replace.namespace} --ignore-not-found \
+        || true
+
+      kubectl --context=${self.triggers_replace.kube_context} \
+        get crd kibanas.kibana.k8s.elastic.co > /dev/null 2>&1 && \
+        kubectl --context=${self.triggers_replace.kube_context} delete kibana \
+          kibana -n ${self.triggers_replace.namespace} --ignore-not-found \
+        || true
+
+      kubectl --context=${self.triggers_replace.kube_context} \
+        get crd elasticsearches.elasticsearch.k8s.elastic.co > /dev/null 2>&1 && \
+        kubectl --context=${self.triggers_replace.kube_context} delete elasticsearch \
+          elasticsearch -n ${self.triggers_replace.namespace} --ignore-not-found \
+        || true
+
+      kubectl --context=${self.triggers_replace.kube_context} delete clusterrolebinding \
+        fleet-server-${self.triggers_replace.namespace} elastic-agent-${self.triggers_replace.namespace} --ignore-not-found
+      kubectl --context=${self.triggers_replace.kube_context} delete clusterrole \
+        fleet-server-${self.triggers_replace.namespace} elastic-agent-${self.triggers_replace.namespace} --ignore-not-found
+    EOT
+  }
+
+  depends_on = [
+    terraform_data.eck_operator_ready,
+    kubernetes_namespace.elastic,
+  ]
+}
