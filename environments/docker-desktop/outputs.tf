@@ -1,0 +1,60 @@
+output "keycloak_url" {
+  value = "https://${local.keycloak_hostname}"
+}
+
+output "admin_console" {
+  value = "https://${local.keycloak_hostname}/admin"
+}
+
+output "admin_username" {
+  value = var.keycloak_admin_user
+}
+
+output "realm_url" {
+  value = var.enable_realm_import ? "https://${local.keycloak_hostname}/realms/${var.realm_name}" : "realm import disabled"
+}
+
+output "realm_openid_config" {
+  value = var.enable_realm_import ? "https://${local.keycloak_hostname}/realms/${var.realm_name}/.well-known/openid-configuration" : "realm import disabled"
+}
+
+output "cert_secret_name" {
+  value = module.cert.secret_name
+}
+
+output "get_admin_credentials" {
+  description = "How to read the admin credentials from the cluster (matches your tfvars)"
+  value       = <<-EOT
+    kubectl get secret keycloak-bootstrap-admin -n ${var.keycloak_namespace} \
+      -o jsonpath='{.data.username}' | base64 -d
+    kubectl get secret keycloak-bootstrap-admin -n ${var.keycloak_namespace} \
+      -o jsonpath='{.data.password}' | base64 -d
+  EOT
+}
+
+# --- Elastic (only populated when enable_elastic = true) ---
+output "elastic_kibana_url" {
+  value = var.enable_elastic ? module.elastic[0].kibana_url : "elastic disabled"
+}
+
+output "elastic_kibana_port_forward" {
+  value = var.enable_elastic ? module.elastic[0].port_forward_kibana : "elastic disabled"
+}
+
+output "elastic_get_password" {
+  value = var.enable_elastic ? module.elastic[0].get_elastic_password : "elastic disabled"
+}
+
+output "elastic_check_status" {
+  value = var.enable_elastic ? module.elastic[0].check_status : "elastic disabled"
+}
+
+# --- kube-state-metrics (only populated when enable_kube_state_metrics = true) ---
+output "kube_state_metrics_service" {
+  value = var.enable_kube_state_metrics ? module.kube_state_metrics[0].service : "kube-state-metrics disabled"
+}
+
+output "kube_state_metrics_elastic_host" {
+  description = "Host to set for the KSM data streams in the Elastic kubernetes integration"
+  value       = var.enable_kube_state_metrics ? module.kube_state_metrics[0].elastic_integration_host : "kube-state-metrics disabled"
+}

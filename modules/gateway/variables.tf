@@ -1,8 +1,8 @@
-variable "gateway_namespace"  {}
+variable "gateway_namespace" {}
 variable "keycloak_namespace" {}
-variable "hostname"           {}
-variable "tls_secret_name"    {}
-variable "kube_context"       {}
+variable "hostname" {}
+variable "tls_secret_name" {}
+variable "kube_context" {}
 
 # --- Optional Kibana exposure ---
 variable "enable_kibana_route" {

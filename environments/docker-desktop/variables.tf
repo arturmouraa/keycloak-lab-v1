@@ -14,9 +14,22 @@ variable "gateway_namespace" {
   default = "gateway"
 }
 
+# --- Hostnames ------------------------------------------------------------
+# Leave these at "" (the default) to auto-derive from `domain` when
+# enable_lets_encrypt = true (e.g. "keycloak.${domain}"), or fall back to the
+# *.local self-signed defaults when domain is also unset. Set any of them
+# explicitly to override that derivation for just that one hostname.
+
+variable "domain" {
+  description = "Base domain for Let's Encrypt hostnames (e.g. example.com), managed in Cloudflare DNS. Only used when enable_lets_encrypt = true — per-service hostname variables below default to <service>.<domain> when this is set, or override any of them individually."
+  type        = string
+  default     = ""
+}
+
 variable "keycloak_hostname" {
-  description = "Hostname used for Keycloak ingress + TLS cert SAN"
-  default     = "keycloak.local"
+  description = "Hostname used for Keycloak ingress + TLS cert SAN. \"\" derives from domain (keycloak.<domain>) or falls back to keycloak.local"
+  type        = string
+  default     = ""
 }
 
 variable "keycloak_admin_user" {
@@ -132,7 +145,7 @@ variable "elastic_kibana_memory" {
 }
 
 variable "elastic_enable_external_fleet" {
-  description = "Expose Fleet Server outside the cluster via a MetalLB LoadBalancer Service, so Elastic Agents running on bare-metal hosts, VMs, or other clusters can enroll and check in directly."
+  description = "Expose Fleet Server outside the cluster via a MetalLB LoadBalancer Service, so Elastic Agents running on bare-metal hosts, VMs, or other clusters can enroll and check in directly. Not applicable on plain Docker Desktop (no MetalLB) unless you're running one."
   default     = false
 }
 
@@ -142,7 +155,7 @@ variable "elastic_external_fleet_host" {
 }
 
 variable "elastic_external_fleet_load_balancer_ip" {
-  description = "Optional static IP (from your MetalLB pool) to pin Fleet Server's external LoadBalancer Service to. Leave empty to let MetalLB assign any free IP."
+  description = "Optional static IP (from your MetalLB pool) to pin Fleet Server's external LoadBalancer Service to. Leave empty to let MetalLB assign any free IP, or on plain Docker Desktop."
   default     = ""
 }
 
@@ -152,8 +165,9 @@ variable "expose_kibana_via_gateway" {
 }
 
 variable "elastic_kibana_hostname" {
-  description = "Hostname for Kibana via the gateway (add to /etc/hosts, becomes a TLS SAN)"
-  default     = "kibana.local"
+  description = "Hostname for Kibana via the gateway (add to /etc/hosts, becomes a TLS SAN). \"\" derives from domain (kibana.<domain>) or falls back to kibana.local"
+  type        = string
+  default     = ""
 }
 
 # --- Expose Elasticsearch API through the gateway ---
@@ -163,8 +177,9 @@ variable "expose_es_via_gateway" {
 }
 
 variable "elastic_es_hostname" {
-  description = "Hostname for the Elasticsearch API via the gateway (becomes a TLS SAN). Requires disabling ES self-signed HTTP TLS so the gateway terminates TLS instead."
-  default     = "elasticsearch.local"
+  description = "Hostname for the Elasticsearch API via the gateway (becomes a TLS SAN). \"\" derives from domain (elasticsearch.<domain>) or falls back to elasticsearch.local"
+  type        = string
+  default     = ""
 }
 
 # --- Expose Fleet Server through the gateway ---
@@ -174,8 +189,9 @@ variable "expose_fleet_via_gateway" {
 }
 
 variable "elastic_fleet_hostname" {
-  description = "Hostname for Fleet Server via the gateway (becomes a TLS SAN). Requires disabling Fleet self-signed HTTP TLS."
-  default     = "fleet.local"
+  description = "Hostname for Fleet Server via the gateway (becomes a TLS SAN). \"\" derives from domain (fleet.<domain>) or falls back to fleet.local"
+  type        = string
+  default     = ""
 }
 
 # --- Fleet L4 fallback (dedicated LoadBalancer + real cert, no gateway) ---
@@ -189,29 +205,45 @@ variable "enable_fleet_direct_tls" {
 
 # --- Fleet Let's Encrypt via a TLS-terminating reverse proxy (Option B) ---
 variable "enable_fleet_le_proxy" {
-  description = "Put a small nginx TLS-terminating reverse proxy in front of Fleet Server: it presents a Let's Encrypt cert for elastic_fleet_hostname and re-encrypts to Fleet's stock self-signed :8220. Fleet stays untouched/healthy; external agents get a publicly-trusted endpoint. Point elastic_fleet_hostname DNS at fleet_le_proxy_load_balancer_ip. Requires enable_lets_encrypt/cert-manager."
+  description = "Put a small nginx TLS-terminating reverse proxy in front of Fleet Server: it presents a Let's Encrypt cert for elastic_fleet_hostname and re-encrypts to Fleet's stock self-signed :8220. Fleet stays untouched/healthy; external agents get a publicly-trusted endpoint. Point elastic_fleet_hostname DNS at fleet_le_proxy_load_balancer_ip. Requires enable_lets_encrypt."
   default     = false
 }
 
 variable "fleet_le_proxy_load_balancer_ip" {
-  description = "MetalLB IP for the Fleet LE proxy's LoadBalancer Service. Point elastic_fleet_hostname DNS here. Leave empty to let MetalLB assign one."
+  description = "MetalLB IP for the Fleet LE proxy's LoadBalancer Service. Point elastic_fleet_hostname DNS here. Not applicable on plain Docker Desktop."
   default     = ""
 }
 
-# --- TLS / Let's Encrypt ---
+# --- TLS / Let's Encrypt via Cloudflare DNS-01 -----------------------------
+# Self-contained: this environment installs cert-manager itself (see
+# modules/cloudflare-dns01) rather than assuming it's provisioned elsewhere.
+
 variable "enable_lets_encrypt" {
-  description = "Issue gateway TLS certs via cert-manager + Let's Encrypt instead of the built-in self-signed CA. Requires cert-manager and the ClusterIssuer installed by ../proxmox-k8s (enable_cert_manager=true), and PUBLIC Cloudflare-managed hostnames (not .local)."
+  description = "Issue gateway TLS certs via cert-manager + Let's Encrypt (Cloudflare DNS-01) instead of the built-in self-signed CA. This environment installs cert-manager itself. Requires cloudflare_api_token, domain (or explicit per-service hostnames), and acme_email, and PUBLIC Cloudflare-managed hostnames (not .local)."
   default     = false
 }
 
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token scoped to Zone:DNS:Edit on the zone covering `domain`. Required when enable_lets_encrypt = true. Get one at https://dash.cloudflare.com/profile/api-tokens."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "acme_email" {
+  description = "Email address registered with Let's Encrypt for expiry notices and ACME account recovery. Required when enable_lets_encrypt = true."
+  type        = string
+  default     = ""
+}
+
 variable "cluster_issuer" {
-  description = "cert-manager ClusterIssuer to use when enable_lets_encrypt = true. Use letsencrypt-staging while testing, letsencrypt-prod once certs issue cleanly. Matches the `cluster_issuer` output from ../proxmox-k8s."
+  description = "cert-manager ClusterIssuer to use when enable_lets_encrypt = true. Use letsencrypt-staging while testing (higher rate limits, untrusted cert), letsencrypt-prod once certs issue cleanly. Both are created by this environment's cloudflare-dns01 module."
   default     = "letsencrypt-staging"
 }
 
-# --- Bare-metal / MetalLB ---
+# --- Bare-metal / MetalLB (rarely needed on plain Docker Desktop) ---
 variable "gateway_load_balancer_ip" {
-  description = "Pin the NGINX gateway's LoadBalancer IP (MetalLB). Leave empty on Docker Desktop. On Proxmox set to the MetalLB pool IP that /etc/hosts points at."
+  description = "Pin the NGINX gateway's LoadBalancer IP via MetalLB. Leave empty on plain Docker Desktop — its LoadBalancer implementation maps to 127.0.0.1 without this."
   default     = ""
 }
 

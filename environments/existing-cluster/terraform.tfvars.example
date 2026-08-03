@@ -1,8 +1,11 @@
 # =============================================================================
-# Platform stack values for the PROXMOX cluster (provisioned by ../proxmox-k8s).
-# Copy to terraform.tfvars when deploying against Proxmox:
-#     cp terraform.tfvars.proxmox.example terraform.tfvars
-# (Keep terraform.tfvars.example for the Docker Desktop values.)
+# environments/existing-cluster — values for an existing/bare-metal cluster
+# (this example targets the Proxmox cluster provisioned by ../proxmox-k8s).
+# Copy to terraform.tfvars in this directory:
+#     cp terraform.tfvars.example terraform.tfvars
+#
+# For plain Docker Desktop instead, use ../docker-desktop/ (a separate root
+# config with its own state — see that directory's terraform.tfvars.example).
 # =============================================================================
 
 # Point at the Proxmox cluster. The cluster stack renamed its context to

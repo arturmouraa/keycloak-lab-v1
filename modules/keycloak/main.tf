@@ -101,13 +101,13 @@ locals {
 
         clients = [
           {
-            clientId              = var.realm_client_id
-            enabled               = true
-            publicClient          = true
-            standardFlowEnabled   = true
+            clientId                  = var.realm_client_id
+            enabled                   = true
+            publicClient              = true
+            standardFlowEnabled       = true
             directAccessGrantsEnabled = true
-            redirectUris          = var.realm_client_redirect_uris
-            webOrigins            = ["+"] # allow CORS from all registered redirect URIs
+            redirectUris              = var.realm_client_redirect_uris
+            webOrigins                = ["+"] # allow CORS from all registered redirect URIs
           }
         ]
       }

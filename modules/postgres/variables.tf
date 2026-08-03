@@ -1,4 +1,4 @@
-variable "namespace"    {}
+variable "namespace" {}
 variable "kube_context" {}
 
 variable "db_name" {

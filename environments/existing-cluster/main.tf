@@ -53,7 +53,7 @@ resource "terraform_data" "config_guard" {
 }
 
 module "cert" {
-  source    = "./modules/cert"
+  source    = "../../modules/cert"
   hostname  = var.keycloak_hostname
   namespace = var.keycloak_namespace
 
@@ -74,7 +74,7 @@ module "cert" {
 }
 
 module "gateway" {
-  source             = "./modules/gateway"
+  source             = "../../modules/gateway"
   gateway_namespace  = var.gateway_namespace
   keycloak_namespace = var.keycloak_namespace
   hostname           = var.keycloak_hostname
@@ -96,7 +96,7 @@ module "gateway" {
 }
 
 module "postgres" {
-  source       = "./modules/postgres"
+  source       = "../../modules/postgres"
   namespace    = var.keycloak_namespace
   kube_context = var.kube_context
   db_name      = var.postgres_db_name
@@ -107,7 +107,7 @@ module "postgres" {
 }
 
 module "keycloak" {
-  source         = "./modules/keycloak"
+  source         = "../../modules/keycloak"
   namespace      = var.keycloak_namespace
   hostname       = var.keycloak_hostname
   kube_context   = var.kube_context
@@ -131,7 +131,7 @@ module "keycloak" {
 # -----------------------------------------------------------------------------
 module "elastic" {
   count  = var.enable_elastic ? 1 : 0
-  source = "./modules/elastic"
+  source = "../../modules/elastic"
 
   kube_context    = var.kube_context
   namespace       = var.elastic_namespace
@@ -169,7 +169,7 @@ module "elastic" {
   enable_external_fleet           = var.elastic_enable_external_fleet
   external_fleet_host             = var.elastic_external_fleet_host
   external_fleet_load_balancer_ip = var.elastic_external_fleet_load_balancer_ip
-  gateway_namespace   = var.keycloak_namespace
+  gateway_namespace               = var.keycloak_namespace
 
   # The gateway must exist (with its Kibana listeners) before the route attaches.
   depends_on = [module.gateway]
@@ -181,7 +181,7 @@ module "elastic" {
 # -----------------------------------------------------------------------------
 module "kube_state_metrics" {
   count  = var.enable_kube_state_metrics ? 1 : 0
-  source = "./modules/kube-state-metrics"
+  source = "../../modules/kube-state-metrics"
 
   namespace        = var.kube_state_metrics_namespace
   create_namespace = var.kube_state_metrics_namespace != "kube-system"

@@ -6,14 +6,14 @@ terraform {
   }
 }
 
-variable "namespace"      {}
-variable "hostname"       {}
-variable "kube_context"   {}
-variable "admin_user"     {}
+variable "namespace" {}
+variable "hostname" {}
+variable "kube_context" {}
+variable "admin_user" {}
 variable "admin_password" { sensitive = true }
-variable "db_host"        {}
-variable "db_port"        { default = 5432 }
-variable "db_name"        {}
+variable "db_host" {}
+variable "db_port" { default = 5432 }
+variable "db_name" {}
 variable "db_secret_name" {}
 
 # --- Realm import ---
