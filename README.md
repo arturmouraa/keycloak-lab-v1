@@ -84,6 +84,28 @@ cp terraform.tfvars.example terraform.tfvars
 # then edit terraform.tfvars
 ```
 
+`keycloak_admin_password` and `postgres_db_password` must be changed from their
+placeholder defaults — `validation` blocks on both variables reject common
+placeholder values (`admin`, `changeme`, `keycloak`, etc.) outright, so
+`terraform plan` fails with a clear error until you set real ones.
+
+### Deploying to Proxmox / bare-metal instead of Docker Desktop
+
+`terraform.tfvars.proxmox.example` is a second starting point for a bare-metal
+cluster fronted by MetalLB, with Let's Encrypt (cert-manager) as an alternative
+to the built-in self-signed CA. Copy it instead of the Docker Desktop example:
+
+```bash
+cp terraform.tfvars.proxmox.example terraform.tfvars
+# then edit terraform.tfvars — the file's comments walk through MetalLB
+# IP pinning (gateway_load_balancer_ip) and enabling Let's Encrypt
+# (enable_lets_encrypt, cluster_issuer)
+```
+
+See the [Configuration reference](#configuration-reference) below for every
+variable this path touches (TLS/Let's Encrypt, bare-metal/MetalLB, and the
+per-component gateway-exposure toggles).
+
 ## 3. Deploy
 
 ```bash
@@ -182,8 +204,11 @@ Kibana in-cluster. Concretely, when `expose_kibana_via_gateway = true`:
   HTTP on 5601, and `server.publicBaseUrl = https://kibana.local` makes it
   generate correct external links.
 
-This avoids the experimental `BackendTLSPolicy` and keeps everything on standard
-Gateway API features.
+This avoids `BackendTLSPolicy` for Kibana specifically. The optional
+Elasticsearch-API route (`expose_es_via_gateway`) takes the opposite approach —
+it keeps ES's self-signed TLS on and uses `BackendTLSPolicy` so the gateway
+re-encrypts to it — since re-encrypting to a datastore's own TLS is worth the
+extra piece, whereas terminating once for an HTTP-only UI like Kibana isn't.
 
 ## Configuration reference
 
@@ -199,10 +224,10 @@ All variables have sensible defaults for local dev; override them in `terraform.
 | `gateway_namespace` | `gateway` | Namespace for the NGINX Gateway Fabric controller |
 | `keycloak_hostname` | `keycloak.local` | Hostname for TLS SAN + routing (match /etc/hosts) |
 | `keycloak_admin_user` | `admin` | Initial admin username (first start only) |
-| `keycloak_admin_password` | `admin` | Initial admin password (first start only) |
+| `keycloak_admin_password` | `admin`, but **rejected by validation** — must override | Initial admin password (first start only) |
 | `postgres_db_name` | `keycloak` | PostgreSQL database name |
 | `postgres_db_user` | `keycloak` | PostgreSQL user |
-| `postgres_db_password` | `keycloak` | PostgreSQL password |
+| `postgres_db_password` | `keycloak`, but **rejected by validation** — must override | PostgreSQL password |
 | `enable_realm_import` | `true` | Provision a realm via KeycloakRealmImport |
 | `realm_name` | `demo` | Name of the realm to import |
 | `realm_client_id` | `demo-client` | Client ID created inside the realm |
@@ -216,12 +241,62 @@ All variables have sensible defaults for local dev; override them in `terraform.
 | `elastic_namespace` | `elastic-stack` | Namespace for Elasticsearch/Kibana/Agents |
 | `eck_version` | `3.4.0` | ECK operator version |
 | `elastic_stack_version` | `9.4.3` | Elastic Stack version |
-| `elastic_es_node_count` | `1` | Elasticsearch node count (keep 1 on Docker Desktop) |
+| `elastic_es_node_count` | `1` | Elasticsearch node count (keep 1 on Docker Desktop; `2` requires `elastic_enable_voting_only_node = true`, enforced at plan time) |
+| `elastic_enable_voting_only_node` | `false` | Add a 3rd, master-eligible-only node so a 2-node cluster can still reach quorum |
+| `elastic_es_voting_only_memory` | `1Gi` | Memory request/limit for the voting-only node |
+| `elastic_es_voting_only_storage_size` | `2Gi` | PVC size for the voting-only node (cluster state only, no shard data) |
 | `elastic_es_memory` | `2Gi` | Memory request/limit per Elasticsearch node |
 | `elastic_es_storage_size` | `5Gi` | PVC size per Elasticsearch node |
 | `elastic_kibana_memory` | `1Gi` | Memory request/limit for Kibana |
 | `expose_kibana_via_gateway` | `true` | Expose Kibana through the NGINX gateway |
 | `elastic_kibana_hostname` | `kibana.local` | External hostname for Kibana (becomes a TLS SAN) |
+| `elastic_enable_external_fleet` | `false` | Expose Fleet Server outside the cluster via a MetalLB LoadBalancer, for agents on bare-metal hosts/VMs/other clusters |
+| `elastic_external_fleet_host` | `""` | Hostname/IP external agents use to reach Fleet Server (required when `elastic_enable_external_fleet = true`) |
+| `elastic_external_fleet_load_balancer_ip` | `""` | Optional static MetalLB IP to pin Fleet Server's external LoadBalancer to |
+
+### Exposing Elasticsearch / Fleet Server through the gateway
+
+Off by default — Kibana is the only Elastic component fronted by the gateway
+out of the box. See [How Kibana is exposed through the gateway](#how-kibana-is-exposed-through-the-gateway)
+for the pattern these mirror.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `expose_es_via_gateway` | `false` | Expose the Elasticsearch HTTP API through the gateway. **Security note:** this publishes a datastore endpoint — protect it with strong Elasticsearch credentials and, ideally, network restrictions |
+| `elastic_es_hostname` | `elasticsearch.local` | Hostname for the Elasticsearch API via the gateway (becomes a TLS SAN) |
+| `expose_fleet_via_gateway` | `false` | Expose Fleet Server through the gateway. Fleet's long-polling check-in over HTTP/2 can need L7 tuning behind a gateway — `elastic_enable_external_fleet` (a dedicated L4 LoadBalancer) is the more robust option |
+| `elastic_fleet_hostname` | `fleet.local` | Hostname for Fleet Server via the gateway (becomes a TLS SAN) |
+| `enable_fleet_direct_tls` | `false` | Serve a cert-manager cert directly on Fleet's `:8220` LoadBalancer instead of the gateway. Needs an issuer that populates `ca.crt` (not Let's Encrypt/ACME) |
+| `enable_fleet_le_proxy` | `false` | Front Fleet Server with a small nginx TLS-terminating proxy that presents a Let's Encrypt cert and re-encrypts to Fleet's stock self-signed `:8220`. Requires `enable_lets_encrypt`/cert-manager |
+| `fleet_le_proxy_load_balancer_ip` | `""` | MetalLB IP for the Fleet LE proxy's LoadBalancer Service |
+
+`expose_fleet_via_gateway`, `enable_fleet_direct_tls`, and `enable_fleet_le_proxy`
+are mutually exclusive Fleet exposure methods — enabling more than one fails at
+plan time.
+
+### TLS / Let's Encrypt
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `enable_lets_encrypt` | `false` | Issue gateway TLS certs via cert-manager + Let's Encrypt instead of the built-in self-signed CA. Requires cert-manager and PUBLIC, Cloudflare-managed hostnames (not `.local`) |
+| `cluster_issuer` | `letsencrypt-staging` | cert-manager `ClusterIssuer` to use when `enable_lets_encrypt = true` (or for the Fleet direct-TLS/LE-proxy paths) |
+
+### Bare-metal / MetalLB
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `gateway_load_balancer_ip` | `""` | Pin the NGINX gateway's LoadBalancer IP via MetalLB. Leave empty on Docker Desktop; on Proxmox, set to the MetalLB pool IP your `/etc/hosts` entries point at |
+
+### kube-state-metrics
+
+Feeds the Elastic Agent Kubernetes integration's `state_*` metrics. Independent
+of both stacks above.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `enable_kube_state_metrics` | `true` | Whether to install kube-state-metrics |
+| `kube_state_metrics_namespace` | `kube-system` | Namespace for kube-state-metrics |
+| `kube_state_metrics_chart_version` | `5.27.1` | kube-state-metrics Helm chart version (prometheus-community) |
 
 ## Outputs
 
@@ -238,6 +313,8 @@ All variables have sensible defaults for local dev; override them in `terraform.
 | `elastic_kibana_port_forward` | Command to port-forward Kibana |
 | `elastic_get_password` | Command to read the `elastic` user password |
 | `elastic_check_status` | Command to check Elastic resource status |
+| `kube_state_metrics_service` | kube-state-metrics Service (or a disabled notice) |
+| `kube_state_metrics_elastic_host` | Host to set for the KSM data streams in the Elastic Kubernetes integration |
 
 ## PostgreSQL persistence
 
@@ -293,17 +370,19 @@ destroying the Elasticsearch resource releases its PVC; data is not retained.
 ## Project layout
 
 ```
-terraform-keycloak/
-├── main.tf                     # module wiring
+keycloak-lab-v1/
+├── main.tf                           # module wiring + cross-variable config guardrails
 ├── variables.tf
 ├── outputs.tf
 ├── providers.tf
-├── terraform.tfvars.example
-├── certs/                      # generated CA cert (git-ignored)
+├── terraform.tfvars.example          # Docker Desktop starting point
+├── terraform.tfvars.proxmox.example  # Proxmox/MetalLB + Let's Encrypt starting point
+├── certs/                            # generated CA cert (git-ignored, self-signed path only)
 └── modules/
-    ├── cert/                   # self-signed CA + server cert (multi-SAN), TLS secret, namespace
-    ├── gateway/                # Gateway API CRDs, NGINX Gateway Fabric, Gateway + routes (Keycloak + Kibana listeners)
+    ├── cert/                   # self-signed CA + server cert (multi-SAN), or cert-manager/Let's Encrypt, TLS secret, namespace
+    ├── gateway/                # Gateway API CRDs, NGINX Gateway Fabric, Gateway + routes (Keycloak/Kibana/Elasticsearch/Fleet listeners)
     ├── postgres/               # PostgreSQL Deployment, Service, PVC, Secret
     ├── keycloak/               # Operator, Keycloak CR, realm import
-    └── elastic/                # ECK operator + Elasticsearch, Kibana, Fleet Server, Elastic Agent, Kibana route
+    ├── elastic/                # ECK operator + Elasticsearch, Kibana, Fleet Server, Elastic Agent, gateway routes
+    └── kube-state-metrics/     # kube-state-metrics Helm release
 ```
