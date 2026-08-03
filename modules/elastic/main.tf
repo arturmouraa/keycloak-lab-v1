@@ -800,6 +800,50 @@ resource "terraform_data" "elastic_stack" {
 }
 
 # -----------------------------------------------------------------------------
+# Step 6b — Wait for ECK to generate the "elastic" superuser Secret, then read
+# it into Terraform state so it can be exposed as an output. `kubectl apply`
+# on the Elasticsearch CR only guarantees the object was accepted — ECK
+# creates this Secret asynchronously as it reconciles, so it isn't
+# necessarily there yet by the time elastic_stack's apply returns.
+# -----------------------------------------------------------------------------
+resource "terraform_data" "elastic_password_ready" {
+  triggers_replace = {
+    kube_context = var.kube_context
+    namespace    = var.namespace
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      CTX="${var.kube_context}"; NS="${var.namespace}"
+      for i in $(seq 1 30); do
+        VAL=$(kubectl --context "$CTX" -n "$NS" get secret elasticsearch-es-elastic-user \
+          -o jsonpath='{.data.elastic}' 2>/dev/null || true)
+        [ -n "$VAL" ] && exit 0
+        echo "  ...elasticsearch-es-elastic-user secret not ready ($i/30), sleeping 10s"
+        sleep 10
+      done
+      echo "ERROR: elasticsearch-es-elastic-user secret not found after 300s"
+      exit 1
+    EOT
+  }
+
+  depends_on = [terraform_data.elastic_stack]
+}
+
+# depends_on defers this read to apply time (after the wait above), rather
+# than trying — and failing — to read it during plan on a first-ever apply.
+data "kubernetes_secret" "elastic_password" {
+  metadata {
+    name      = "elasticsearch-es-elastic-user"
+    namespace = var.namespace
+  }
+
+  depends_on = [terraform_data.elastic_password_ready]
+}
+
+# -----------------------------------------------------------------------------
 # Step 7 — Gateway routes for Kibana / Elasticsearch / Fleet (separate resource
 # on purpose). Kept out of stack_manifest so changing a hostname or route only
 # re-applies these HTTPRoutes — it never forces a replace of the Elastic stack.

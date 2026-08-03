@@ -377,19 +377,24 @@ of both stacks above.
 ## Outputs
 
 Run `terraform output` from inside the environment directory you applied from.
+`admin_password` and `elastic_password` are marked `sensitive` — Terraform
+hides them from plain `terraform output`; use `terraform output -raw
+admin_password` (or `-json` for scripts) to print the actual value.
 
 | Output | Description |
 |--------|-------------|
 | `keycloak_url` | Base URL |
 | `admin_console` | Admin console URL |
 | `admin_username` | Configured admin username |
+| `admin_password` | Keycloak admin password (sensitive). From `terraform.tfvars`, not read back from the cluster — see the output's own description for the first-boot-only caveat |
 | `realm_url` | Imported realm URL (or a disabled notice) |
 | `realm_openid_config` | OIDC discovery URL for the realm |
 | `cert_secret_name` | Name of the TLS secret used by the gateway |
-| `get_admin_credentials` | Commands to read the Keycloak admin credentials |
+| `get_admin_credentials` | Commands to read the Keycloak admin credentials from the cluster directly, as an alternative to `admin_password` |
 | `elastic_kibana_url` | Kibana URL (gateway) or a port-forward note |
 | `elastic_kibana_port_forward` | Command to port-forward Kibana |
-| `elastic_get_password` | Command to read the `elastic` user password |
+| `elastic_password` | The `elastic` superuser password (sensitive), read directly from the ECK-generated secret |
+| `elastic_get_password` | Command to read the `elastic` user password yourself, as an alternative to `elastic_password` |
 | `elastic_check_status` | Command to check Elastic resource status |
 | `kube_state_metrics_service` | kube-state-metrics Service (or a disabled notice) |
 | `kube_state_metrics_elastic_host` | Host to set for the KSM data streams in the Elastic Kubernetes integration |
