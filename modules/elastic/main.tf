@@ -837,15 +837,87 @@ resource "terraform_data" "elastic_password_ready" {
   depends_on = [terraform_data.elastic_stack]
 }
 
-# depends_on defers this read to apply time (after the wait above), rather
-# than trying — and failing — to read it during plan on a first-ever apply.
+# -----------------------------------------------------------------------------
+# Step 6c — Optionally set the "elastic" superuser password to a caller-chosen
+# value instead of ECK's auto-generated one. ECK has no declarative field for
+# this — the built-in elastic user isn't something a file-realm/custom-user
+# secret can override — so per Elastic's own docs this is done via the
+# Security API after the cluster is up, authenticated with the current
+# (auto-generated) password. Runs via `kubectl exec` + curl *inside* the
+# Elasticsearch pod itself (loopback to localhost:9200 — that's why skipping
+# TLS verification here doesn't cross any real network boundary), retrying
+# since the secret existing doesn't guarantee the security index is ready to
+# serve auth yet. Afterwards, syncs the elasticsearch-es-elastic-user Secret
+# so subsequent reads (the elastic_password output, kubectl get secret) show
+# the new value instead of the stale auto-generated one — same class of bug
+# as the Postgres/Keycloak password drift this project hit before.
+# -----------------------------------------------------------------------------
+resource "terraform_data" "elastic_password_set" {
+  count = var.custom_elastic_password != "" ? 1 : 0
+
+  triggers_replace = {
+    kube_context    = var.kube_context
+    namespace       = var.namespace
+    target_password = var.custom_elastic_password
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      TARGET_ES_PASSWORD = var.custom_elastic_password
+    }
+    command = <<-EOT
+      set -euo pipefail
+      CTX="${var.kube_context}"; NS="${var.namespace}"
+
+      # Basic JSON-string escaping (backslash, double-quote) — sufficient for
+      # realistic password content without adding a jq dependency.
+      ESCAPED_PW=$(printf '%s' "$TARGET_ES_PASSWORD" | sed 's/\\/\\\\/g; s/"/\\"/g')
+
+      echo "Setting the 'elastic' user password via the Security API..."
+      for i in $(seq 1 30); do
+        CURRENT_PW=$(kubectl --context "$CTX" -n "$NS" get secret elasticsearch-es-elastic-user \
+          -o jsonpath='{.data.elastic}' 2>/dev/null | base64 -d || true)
+        if [ -n "$CURRENT_PW" ] && kubectl --context "$CTX" -n "$NS" exec elasticsearch-es-default-0 -c elasticsearch -- \
+          curl -sf -k -u "elastic:$CURRENT_PW" -X POST "https://localhost:9200/_security/user/elastic/_password" \
+            -H 'Content-Type: application/json' \
+            -d "{\"password\":\"$ESCAPED_PW\"}"; then
+          break
+        fi
+        echo "  ...not ready yet ($i/30), sleeping 10s"
+        sleep 10
+        if [ "$i" = "30" ]; then echo "ERROR: could not set the elastic password after 300s"; exit 1; fi
+      done
+      echo
+
+      echo "Syncing elasticsearch-es-elastic-user to match..."
+      kubectl --context "$CTX" -n "$NS" create secret generic elasticsearch-es-elastic-user \
+        --from-literal=elastic="$TARGET_ES_PASSWORD" \
+        --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
+    EOT
+  }
+
+  # Doesn't rotate the password back to a fresh auto-generated one if you
+  # later unset custom_elastic_password — it just stops being managed here.
+  # Use ECK's own rotation mechanism (delete the Secret) if you want that.
+  provisioner "local-exec" {
+    when    = destroy
+    command = "echo 'Leaving the elastic user password as last set; unsetting custom_elastic_password does not revert it.'"
+  }
+
+  depends_on = [terraform_data.elastic_password_ready]
+}
+
+# depends_on defers this read to apply time (after the waits/set above),
+# rather than trying — and failing — to read it during plan on a first-ever
+# apply, and ensures it reflects a custom password once one has been set.
 data "kubernetes_secret" "elastic_password" {
   metadata {
     name      = "elasticsearch-es-elastic-user"
     namespace = var.namespace
   }
 
-  depends_on = [terraform_data.elastic_password_ready]
+  depends_on = [terraform_data.elastic_password_ready, terraform_data.elastic_password_set]
 }
 
 # -----------------------------------------------------------------------------

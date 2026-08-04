@@ -144,6 +144,18 @@ variable "elastic_kibana_memory" {
   default     = "1Gi"
 }
 
+variable "elastic_password" {
+  description = "Set the 'elastic' superuser password to this value instead of ECK's auto-generated one (applied via the Security API after Elasticsearch is up). Leave empty to keep ECK's auto-generated password."
+  type        = string
+  sensitive   = true
+  default     = ""
+
+  validation {
+    condition     = var.elastic_password == "" || !contains(["admin", "password", "changeme", "keycloak", "elastic", "root", "test"], lower(var.elastic_password))
+    error_message = "elastic_password looks like a placeholder/weak default — set a real password, or leave it empty to use ECK's auto-generated one."
+  }
+}
+
 variable "elastic_enable_external_fleet" {
   description = "Expose Fleet Server outside the cluster via a MetalLB LoadBalancer Service, so Elastic Agents running on bare-metal hosts, VMs, or other clusters can enroll and check in directly. Not applicable on plain Docker Desktop (no MetalLB) unless you're running one."
   default     = false

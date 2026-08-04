@@ -58,6 +58,13 @@ variable "kibana_memory" {
   default     = "1Gi"
 }
 
+variable "custom_elastic_password" {
+  description = "Set the 'elastic' superuser password to this value instead of ECK's auto-generated one, via the Elasticsearch Security API. Empty (default) leaves ECK's auto-generated password in place."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "enable_external_fleet" {
   description = "Expose Fleet Server outside the cluster via a MetalLB LoadBalancer Service, so Elastic Agents running on bare-metal hosts, VMs, or other clusters can enroll and check in directly."
   default     = false

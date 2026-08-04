@@ -316,6 +316,7 @@ Unless a table says otherwise, these exist in both environments — the two
 | `elastic_es_memory` | `2Gi` | Memory request/limit per Elasticsearch node |
 | `elastic_es_storage_size` | `5Gi` | PVC size per Elasticsearch node |
 | `elastic_kibana_memory` | `1Gi` | Memory request/limit for Kibana |
+| `elastic_password` | `""` | Set the `elastic` superuser password to this value instead of ECK's auto-generated one — applied via the Security API after Elasticsearch is up (ECK has no declarative field for this). See [Setting a custom elastic password](#setting-a-custom-elastic-password) |
 | `expose_kibana_via_gateway` | `true` | Expose Kibana through the NGINX gateway |
 | `elastic_kibana_hostname` | `kibana.local` (`existing-cluster`); `""` → derives from `domain` (`docker-desktop`) | External hostname for Kibana (becomes a TLS SAN) |
 | `elastic_enable_external_fleet` | `false` | Expose Fleet Server outside the cluster via a MetalLB LoadBalancer, for agents on bare-metal hosts/VMs/other clusters |
@@ -441,6 +442,31 @@ to skip it entirely.
   large ECK CRDs otherwise hit.
 - **Single-node dev cluster.** `node.store.allow_mmap: false` is set so
   Elasticsearch runs without tuning `vm.max_map_count`.
+
+## Setting a custom elastic password
+
+By default ECK auto-generates the `elastic` superuser's password and stores it
+in the `elasticsearch-es-elastic-user` Secret — that's what `elastic_get_password`
+and the `elastic_password` output read. ECK has no declarative field to set
+this password yourself (file-realm/custom-user secrets add *additional* users,
+they can't override the built-in `elastic` user), so setting `elastic_password`
+in `terraform.tfvars` takes the officially documented route instead: after
+Elasticsearch is up, Terraform calls the Elasticsearch Security API
+(`POST _security/user/elastic/_password`) via `kubectl exec` + curl inside the
+Elasticsearch pod itself, authenticated with the current password, then syncs
+the `elasticsearch-es-elastic-user` Secret to match so later reads see the new
+value instead of the stale auto-generated one.
+
+Notes:
+- Leave `elastic_password` empty (the default) to keep ECK's auto-generated
+  password — nothing changes.
+- Unsetting `elastic_password` after it's been applied does **not** roll the
+  password back to a fresh auto-generated one; it just stops being managed
+  here. Use ECK's own rotation mechanism (delete the Secret, and ECK
+  regenerates it) if you want that.
+- If you rotate the password outside Terraform (e.g. via Kibana) without
+  touching `terraform.tfvars`, Terraform won't detect or fix that drift on the
+  next apply — same behavior as the other credential variables in this repo.
 
 ## cert-manager + Let's Encrypt via Cloudflare (docker-desktop only)
 

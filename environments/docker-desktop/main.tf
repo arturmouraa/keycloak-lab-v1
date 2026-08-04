@@ -182,6 +182,8 @@ module "elastic" {
   es_storage_size = var.elastic_es_storage_size
   kibana_memory   = var.elastic_kibana_memory
 
+  custom_elastic_password = var.elastic_password
+
   enable_voting_only_node     = var.elastic_enable_voting_only_node
   es_voting_only_memory       = var.elastic_es_voting_only_memory
   es_voting_only_storage_size = var.elastic_es_voting_only_storage_size
