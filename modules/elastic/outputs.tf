@@ -25,8 +25,11 @@ output "get_elastic_password" {
 
 output "elastic_password" {
   description = "The 'elastic' superuser's current password — read directly from the cluster. Either ECK's auto-generated value, or whatever custom_elastic_password was last set to."
-  value       = data.kubernetes_secret.elastic_password.data["elastic"]
-  sensitive   = true
+  # The kubernetes provider marks kubernetes_secret's `data` attribute
+  # sensitive at the schema level regardless of our own config, so this
+  # output has to explicitly opt back out with nonsensitive() to actually
+  # display the value instead of erroring or redacting it.
+  value = nonsensitive(data.kubernetes_secret.elastic_password.data["elastic"])
 }
 
 output "port_forward_kibana" {

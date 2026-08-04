@@ -876,9 +876,15 @@ resource "terraform_data" "elastic_password_set" {
 
       echo "Setting the 'elastic' user password via the Security API..."
       for i in $(seq 1 30); do
+        # Look up the pod's actual (first) container name rather than
+        # assuming "elasticsearch" — ECK's naming isn't guaranteed across
+        # versions/configs, and guessing wrong fails with a misleading
+        # "container not found" rather than a clean retry.
+        CONTAINER=$(kubectl --context "$CTX" -n "$NS" get pod elasticsearch-es-default-0 \
+          -o jsonpath='{.spec.containers[0].name}' 2>/dev/null || true)
         CURRENT_PW=$(kubectl --context "$CTX" -n "$NS" get secret elasticsearch-es-elastic-user \
           -o jsonpath='{.data.elastic}' 2>/dev/null | base64 -d || true)
-        if [ -n "$CURRENT_PW" ] && kubectl --context "$CTX" -n "$NS" exec elasticsearch-es-default-0 -c elasticsearch -- \
+        if [ -n "$CONTAINER" ] && [ -n "$CURRENT_PW" ] && kubectl --context "$CTX" -n "$NS" exec elasticsearch-es-default-0 -c "$CONTAINER" -- \
           curl -sf -k -u "elastic:$CURRENT_PW" -X POST "https://localhost:9200/_security/user/elastic/_password" \
             -H 'Content-Type: application/json' \
             -d "{\"password\":\"$ESCAPED_PW\"}"; then
