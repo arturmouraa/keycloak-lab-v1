@@ -433,7 +433,10 @@ to skip it entirely.
   self-signed TLS; only Kibana's external HTTP layer is switched to plain HTTP when
   fronted by the gateway.
 - **CRDs are cluster-scoped and shared.** Deleting the ECK CRDs deletes *all*
-  Elastic custom resources in the cluster. The `crds.yaml` is applied with
+  Elastic custom resources in the cluster, so `terraform destroy` deliberately
+  leaves them installed (same treatment as the Gateway API and Keycloak
+  Operator CRDs) rather than cascade-deleting cluster-wide — remove them
+  manually if you want them gone. The `crds.yaml` is applied with
   `kubectl apply --server-side` to avoid the client-side annotation size limit the
   large ECK CRDs otherwise hit.
 - **Single-node dev cluster.** `node.store.allow_mmap: false` is set so

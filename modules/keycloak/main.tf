@@ -149,12 +149,15 @@ resource "terraform_data" "keycloak_crds" {
     EOT
   }
 
+  # Deliberately do NOT delete the Keycloak Operator CRDs on destroy/replace.
+  # Deleting them cascades to ALL Keycloak/KeycloakRealmImport custom resources
+  # in the cluster (not just this stack's), and blocks waiting for that
+  # cluster-wide cleanup — same rationale as the Gateway API CRDs in
+  # modules/gateway. If you truly want them gone, remove them manually:
+  #   kubectl delete -f <keycloaks/keycloakrealmimports CRD manifests for the installed version>
   provisioner "local-exec" {
     when    = destroy
-    command = <<-EOT
-      kubectl --context=${self.triggers_replace.kube_context} delete -f ${self.triggers_replace.crds_manifest_url} --ignore-not-found && \
-      kubectl --context=${self.triggers_replace.kube_context} delete -f ${self.triggers_replace.realm_crd_url} --ignore-not-found
-    EOT
+    command = "echo 'Leaving Keycloak Operator CRDs in place (shared/cluster-scoped; delete manually if desired).'"
   }
 }
 

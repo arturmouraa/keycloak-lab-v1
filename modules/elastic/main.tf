@@ -677,10 +677,15 @@ resource "terraform_data" "eck_crds" {
     command = "kubectl --context=${self.triggers_replace.kube_context} apply --server-side -f ${self.triggers_replace.crds_url}"
   }
 
-  # Deleting the ECK CRDs cascades to ALL Elastic custom resources in the cluster.
+  # Deliberately do NOT delete the ECK CRDs on destroy/replace. Deleting them
+  # cascades to ALL Elastic custom resources in the cluster (not just this
+  # stack's), and blocks waiting for that cluster-wide cleanup — same
+  # rationale as the Gateway API CRDs in modules/gateway. If you truly want
+  # them gone, remove them manually:
+  #   kubectl delete -f <crds.yaml for the installed ECK version>
   provisioner "local-exec" {
     when    = destroy
-    command = "kubectl --context=${self.triggers_replace.kube_context} delete -f ${self.triggers_replace.crds_url} --ignore-not-found"
+    command = "echo 'Leaving ECK CRDs in place (shared/cluster-scoped; delete manually if desired).'"
   }
 }
 

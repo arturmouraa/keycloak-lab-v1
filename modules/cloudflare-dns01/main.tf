@@ -64,6 +64,13 @@ resource "helm_release" "cert_manager" {
   namespace        = var.cert_manager_namespace
   create_namespace = true
 
+  # terraform_data.cert_manager_ready below already does an explicit
+  # `kubectl wait --for=condition=Available` on cert-manager's Deployments, so
+  # Helm's own wait would just be a slower, redundant duplicate of the same
+  # check — on create it adds nothing, on destroy it blocks on pod
+  # termination that nothing downstream needs to wait for.
+  wait = false
+
   set {
     name  = "crds.enabled"
     value = "true"

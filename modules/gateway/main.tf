@@ -298,6 +298,13 @@ resource "helm_release" "nginx_gateway" {
   namespace        = var.gateway_namespace
   create_namespace = true
 
+  # terraform_data.nginx_gateway_ready below already does an explicit
+  # `kubectl wait --for=condition=Available` on the controller Deployment, so
+  # Helm's own wait would just be a slower, redundant duplicate of the same
+  # check — on create it adds nothing, on destroy it blocks on pod
+  # termination that nothing downstream needs to wait for.
+  wait = false
+
   set {
     name  = "nginx.service.type"
     value = "LoadBalancer"
